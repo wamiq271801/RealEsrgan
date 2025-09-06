@@ -314,15 +314,17 @@ jobs:
     
     steps:
     - name: Download artifacts
-      uses: actions/download-artifact@v3
-      
+      uses: actions/download-artifact@v4
+      with:
+        merge-multiple: true
+        
     - name: Create release
-      uses: actions/create-release@v1
+      uses: softprops/action-gh-release@v2
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
         tag_name: ${{ github.event.inputs.model_name }}-ncnn-v${{ github.run_number }}
-        release_name: ${{ github.event.inputs.model_name }} NCNN Model
+        name: ${{ github.event.inputs.model_name }} NCNN Model
         body: |
           Automatically converted Real-ESRGAN model to NCNN format
           
@@ -341,3 +343,6 @@ jobs:
           Load the .param and .bin files in your NCNN application for Real-ESRGAN upscaling.
         draft: false
         prerelease: false
+        files: |
+          ${{ github.event.inputs.model_name }}-ncnn/*
+          ${{ github.event.inputs.model_name }}-ncnn-optimized/*

@@ -1,348 +1,64 @@
-name: Real-ESRGAN to NCNN Conversion
+name: Convert Real-ESRGAN to NCNN
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: # manual trigger
     inputs:
       model_url:
-        description: 'Real-ESRGAN model download URL'
+        description: 'Direct URL to the Real-ESRGAN .pth model'
         required: true
-        default: 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth'
-      model_name:
-        description: 'Model name (without extension)'
-        required: true
-        default: 'RealESRGAN_x4plus'
-      scale_factor:
-        description: 'Upscaling factor (2, 4, 8)'
-        required: true
-        default: '4'
-        type: choice
-        options:
-        - '2'
-        - '4'
-        - '8'
+        default: 'https://github.com/xinntao/Real-ESRGAN/releases/download/v0.3.0/RealESRGAN_x4plus.pth'
 
 jobs:
   convert-to-ncnn:
     runs-on: ubuntu-latest
-    
+
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.9'
-        
+    - name: Checkout repo
+      uses: actions/checkout@v3
+
     - name: Install system dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y wget unzip cmake build-essential
-        sudo apt-get install -y libprotobuf-dev protobuf-compiler
-        sudo apt-get install -y libopencv-dev
-        
-    - name: Install Python dependencies
+        sudo apt update
+        sudo apt install -y python3-pip git wget unzip build-essential cmake
+
+    - name: Setup Python environment
       run: |
-        pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
-        pip install opencv-python numpy pillow
-        pip install onnx onnxruntime
-        
-    - name: Download Real-ESRGAN repository
+        python3 -m pip install --upgrade pip
+        pip install torch torchvision onnx onnxruntime opencv-python numpy
+
+    - name: Clone Real-ESRGAN repository
       run: |
         git clone https://github.com/xinntao/Real-ESRGAN.git
         cd Real-ESRGAN
         pip install -r requirements.txt
-        python setup.py develop
-        
-    - name: Download model file
+
+    - name: Download model
       run: |
-        mkdir -p models
-        wget -O models/${{ github.event.inputs.model_name }}.pth "${{ github.event.inputs.model_url }}"
-        
-    - name: Create PyTorch to ONNX conversion script
-      run: |
-        cat > convert_to_onnx.py << 'EOF'
-        import torch
-        import torch.onnx
-        import sys
-        import os
-        sys.path.append('Real-ESRGAN')
-        
-        from realesrgan.archs.rrdbnet_arch import RRDBNet
-        from realesrgan.archs.srvgg_arch import SRVGGNetCompact
-        
-        def convert_to_onnx(model_path, model_name, scale_factor):
-            print(f"Converting {model_path} to ONNX...")
-            
-            # Determine model architecture based on name
-            if 'anime' in model_name.lower():
-                # RealESRGANv2 AnimeVideo uses SRVGGNetCompact
-                model = SRVGGNetCompact(num_in_ch=3, num_out_ch=3, num_feat=64, 
-                                      num_conv=32, upscale=scale_factor, act_type='prelu')
-            else:
-                # Standard RealESRGAN uses RRDBNet
-                model = RRDBNet(num_in_ch=3, num_out_ch=3, num_feat=64, 
-                              num_block=23, num_grow_ch=32, scale=scale_factor)
-            
-            # Load the model weights
-            checkpoint = torch.load(model_path, map_location='cpu')
-            
-            # Handle different checkpoint formats
-            if 'params_ema' in checkpoint:
-                model.load_state_dict(checkpoint['params_ema'], strict=True)
-            elif 'params' in checkpoint:
-                model.load_state_dict(checkpoint['params'], strict=True)
-            else:
-                model.load_state_dict(checkpoint, strict=True)
-            
-            model.eval()
-            
-            # Create dummy input
-            dummy_input = torch.randn(1, 3, 64, 64)
-            
-            # Export to ONNX
-            onnx_path = f"models/{model_name}.onnx"
-            torch.onnx.export(
-                model,
-                dummy_input,
-                onnx_path,
-                export_params=True,
-                opset_version=11,
-                do_constant_folding=True,
-                input_names=['input'],
-                output_names=['output'],
-                dynamic_axes={
-                    'input': {0: 'batch_size', 2: 'height', 3: 'width'},
-                    'output': {0: 'batch_size', 2: 'height', 3: 'width'}
-                }
-            )
-            
-            print(f"ONNX model saved to: {onnx_path}")
-            return onnx_path
-        
-        if __name__ == "__main__":
-            model_path = sys.argv[1]
-            model_name = sys.argv[2]
-            scale_factor = int(sys.argv[3])
-            
-            convert_to_onnx(model_path, model_name, scale_factor)
-        EOF
-        
+        mkdir -p Real-ESRGAN/weights
+        wget -O Real-ESRGAN/weights/model.pth ${{ github.event.inputs.model_url }}
+
     - name: Convert PyTorch model to ONNX
       run: |
-        python convert_to_onnx.py models/${{ github.event.inputs.model_name }}.pth ${{ github.event.inputs.model_name }} ${{ github.event.inputs.scale_factor }}
-        
-    - name: Build NCNN
+        cd Real-ESRGAN
+        python3 basicsr/export_onnx.py --model_path weights/model.pth --output_path weights/model.onnx --half
+
+    - name: Install NCNN tools
       run: |
         git clone https://github.com/Tencent/ncnn.git
         cd ncnn
-        git submodule update --init
-        mkdir build && cd build
-        cmake -DCMAKE_BUILD_TYPE=Release -DNCNN_VULKAN=OFF -DNCNN_SYSTEM_GLSLANG=OFF -DNCNN_BUILD_EXAMPLES=OFF ..
+        mkdir -p build && cd build
+        cmake -DCMAKE_BUILD_TYPE=Release ..
         make -j$(nproc)
-        
-    - name: Create ONNX to NCNN conversion script
-      run: |
-        cat > convert_to_ncnn.py << 'EOF'
-        import subprocess
-        import sys
-        import os
-        
-        def convert_onnx_to_ncnn(onnx_path, output_name):
-            print(f"Converting {onnx_path} to NCNN format...")
-            
-            # Path to onnx2ncnn tool
-            onnx2ncnn_path = "ncnn/build/tools/onnx/onnx2ncnn"
-            
-            if not os.path.exists(onnx2ncnn_path):
-                raise FileNotFoundError(f"onnx2ncnn tool not found at {onnx2ncnn_path}")
-            
-            # Convert ONNX to NCNN
-            param_file = f"models/{output_name}.param"
-            bin_file = f"models/{output_name}.bin"
-            
-            cmd = [onnx2ncnn_path, onnx_path, param_file, bin_file]
-            
-            try:
-                result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-                print("Conversion successful!")
-                print("STDOUT:", result.stdout)
-                if result.stderr:
-                    print("STDERR:", result.stderr)
-                
-                return param_file, bin_file
-                
-            except subprocess.CalledProcessError as e:
-                print(f"Conversion failed with error: {e}")
-                print("STDOUT:", e.stdout)
-                print("STDERR:", e.stderr)
-                raise
-        
-        if __name__ == "__main__":
-            onnx_path = sys.argv[1]
-            output_name = sys.argv[2]
-            
-            convert_onnx_to_ncnn(onnx_path, output_name)
-        EOF
-        
+        cd ../..
+        export PATH=$PWD/ncnn/build/tools:$PATH
+
     - name: Convert ONNX to NCNN
       run: |
-        python convert_to_ncnn.py models/${{ github.event.inputs.model_name }}.onnx ${{ github.event.inputs.model_name }}
-        
-    - name: Optimize NCNN model
-      run: |
-        cd ncnn/build
-        # Run ncnnoptimize if available
-        if [ -f "tools/ncnnoptimize" ]; then
-          ./tools/ncnnoptimize ../../models/${{ github.event.inputs.model_name }}.param ../../models/${{ github.event.inputs.model_name }}.bin ../../models/${{ github.event.inputs.model_name }}_opt.param ../../models/${{ github.event.inputs.model_name }}_opt.bin 65536
-          echo "Optimized NCNN model created"
-        else
-          echo "ncnnoptimize not available, skipping optimization"
-        fi
-        
-    - name: Create model info file
-      run: |
-        cat > models/${{ github.event.inputs.model_name }}_info.txt << EOF
-        Model: ${{ github.event.inputs.model_name }}
-        Scale Factor: ${{ github.event.inputs.scale_factor }}
-        Source URL: ${{ github.event.inputs.model_url }}
-        Conversion Date: $(date)
-        
-        Files generated:
-        - ${{ github.event.inputs.model_name }}.param (NCNN parameter file)
-        - ${{ github.event.inputs.model_name }}.bin (NCNN binary file)
-        - ${{ github.event.inputs.model_name }}.onnx (ONNX intermediate file)
-        - ${{ github.event.inputs.model_name }}.pth (Original PyTorch file)
-        
-        Usage in NCNN:
-        1. Load the .param and .bin files into your NCNN application
-        2. Input should be RGB format with values normalized to [0,1]
-        3. Output will be upscaled by ${SCALE_FACTOR}x
-        EOF
-        
-    - name: Create test script
-      run: |
-        cat > test_ncnn_model.py << 'EOF'
-        import cv2
-        import numpy as np
-        import sys
-        
-        def test_ncnn_model(param_file, bin_file):
-            try:
-                # This is a basic structure test - actual NCNN Python binding would be needed for full test
-                import os
-                
-                if not os.path.exists(param_file):
-                    print(f"ERROR: Parameter file not found: {param_file}")
-                    return False
-                    
-                if not os.path.exists(bin_file):
-                    print(f"ERROR: Binary file not found: {bin_file}")
-                    return False
-                
-                # Check file sizes
-                param_size = os.path.getsize(param_file)
-                bin_size = os.path.getsize(bin_file)
-                
-                print(f"Parameter file size: {param_size} bytes")
-                print(f"Binary file size: {bin_size} bytes")
-                
-                # Basic validation - param file should be text and have some content
-                with open(param_file, 'r') as f:
-                    content = f.read()
-                    if 'Input' in content and 'Output' in content:
-                        print("Parameter file structure looks valid")
-                        return True
-                    else:
-                        print("Parameter file structure may be invalid")
-                        return False
-                        
-            except Exception as e:
-                print(f"Test failed with error: {e}")
-                return False
-        
-        if __name__ == "__main__":
-            param_file = sys.argv[1]
-            bin_file = sys.argv[2]
-            
-            success = test_ncnn_model(param_file, bin_file)
-            if success:
-                print("✓ NCNN model files appear to be valid")
-            else:
-                print("✗ NCNN model validation failed")
-                sys.exit(1)
-        EOF
-        
-    - name: Test NCNN model files
-      run: |
-        python test_ncnn_model.py models/${{ github.event.inputs.model_name }}.param models/${{ github.event.inputs.model_name }}.bin
-        
-    - name: List generated files
-      run: |
-        echo "Generated files:"
-        ls -la models/
-        echo ""
-        echo "File sizes:"
-        du -h models/*
-        
-    - name: Upload NCNN model artifacts
-      uses: actions/upload-artifact@v3
-      with:
-        name: ${{ github.event.inputs.model_name }}-ncnn
-        path: |
-          models/${{ github.event.inputs.model_name }}.param
-          models/${{ github.event.inputs.model_name }}.bin
-          models/${{ github.event.inputs.model_name }}_info.txt
-          models/${{ github.event.inputs.model_name }}.onnx
-        retention-days: 30
-        
-    - name: Upload optimized model (if exists)
-      uses: actions/upload-artifact@v3
-      if: always()
-      with:
-        name: ${{ github.event.inputs.model_name }}-ncnn-optimized
-        path: |
-          models/${{ github.event.inputs.model_name }}_opt.param
-          models/${{ github.event.inputs.model_name }}_opt.bin
-        retention-days: 30
+        mkdir -p Real-ESRGAN/ncnn
+        onnx2ncnn Real-ESRGAN/weights/model.onnx Real-ESRGAN/ncnn/model.param Real-ESRGAN/ncnn/model.bin
 
-  # Optional: Create a release with the converted models
-  create-release:
-    needs: convert-to-ncnn
-    runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
-    
-    steps:
-    - name: Download artifacts
-      uses: actions/download-artifact@v4
+    - name: Upload NCNN model
+      uses: actions/upload-artifact@v3
       with:
-        merge-multiple: true
-        
-    - name: Create release
-      uses: softprops/action-gh-release@v2
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ github.event.inputs.model_name }}-ncnn-v${{ github.run_number }}
-        name: ${{ github.event.inputs.model_name }} NCNN Model
-        body: |
-          Automatically converted Real-ESRGAN model to NCNN format
-          
-          **Model Details:**
-          - Original Model: ${{ github.event.inputs.model_name }}
-          - Scale Factor: ${{ github.event.inputs.scale_factor }}x
-          - Source: ${{ github.event.inputs.model_url }}
-          
-          **Files included:**
-          - `.param` - NCNN parameter file
-          - `.bin` - NCNN binary weights file  
-          - `.onnx` - Intermediate ONNX model
-          - `_info.txt` - Model information and usage instructions
-          
-          **Usage:**
-          Load the .param and .bin files in your NCNN application for Real-ESRGAN upscaling.
-        draft: false
-        prerelease: false
-        files: |
-          ${{ github.event.inputs.model_name }}-ncnn/*
-          ${{ github.event.inputs.model_name }}-ncnn-optimized/*
+        name: realesrgan-ncnn-model
+        path: Real-ESRGAN/ncnn/
